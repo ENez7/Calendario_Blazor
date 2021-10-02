@@ -1,0 +1,130 @@
+@page "/calendar"
+@using Microsoft.Graph
+@using TimeZoneConverter
+
+@inject GraphTutorial.Graph.GraphClientFactory clientFactory
+
+<AuthorizeView>
+    <Authorized>
+        <h1 class="mb-3">Calendar</h1>
+        <a href="/newevent" class="btn btn-light btn-sm mb-3">New event</a>
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Organizer</th>
+                    <th>Subject</th>
+                    <th>Start</th>
+                    <th>End</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach(var calendarEvent in events)
+                {
+                    <tr>
+                        <td>@calendarEvent.Organizer.EmailAddress.Name</td>
+                        <td>@calendarEvent.Subject</td>
+                        <td>@FormatIso8601DateTime(calendarEvent.Start.DateTime)</td>
+                        <td>@FormatIso8601DateTime(calendarEvent.End.DateTime)</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </Authorized>
+    <NotAuthorized>
+        <RedirectToLogin />
+    </NotAuthorized>
+</AuthorizeView>
+
+@code{
+    [CascadingParameter]
+    private Task<AuthenticationState> authenticationStateTask { get; set; }
+
+    private GraphServiceClient graphClient;
+    private IList<Event> events = new List<Event>();
+    private string dateTimeFormat;
+
+    protected override async Task OnInitializedAsync()
+    {
+        // Get the user
+        var user = (await authenticationStateTask).User;
+        var graphTimeZone = user.GetUserGraphTimeZone();
+        dateTimeFormat = $"{user.GetUserGraphDateFormat()} {user.GetUserGraphTimeFormat()}";
+
+        // Calculate the start and end of the current week in user's time zone
+        var startOfWeek = GetUtcStartOfWeekInTimeZone(DateTime.Today, graphTimeZone);
+        var endOfWeek = startOfWeek.AddDays(7);
+
+        graphClient = clientFactory.GetAuthenticatedClient();
+
+        // Specifies the start and end of the view on the calendar
+        // Translates to: ?startDateTime=""&endDateTime=""
+        var viewOptions = new List<QueryOption>
+        {
+            new QueryOption("startDateTime", startOfWeek.ToString("o")),
+            new QueryOption("endDateTime", endOfWeek.ToString("o"))
+        };
+
+        var eventPage = await graphClient.Me
+            .CalendarView
+            .Request(viewOptions)
+            // Send user time zone in request so date/time in
+            // response will be in preferred time zone
+            .Header("Prefer", $"outlook.timezone=\"{graphTimeZone}\"")
+            // Get max 50 per request
+            .Top(50)
+            // Only return fields app will use
+            .Select(e => new
+            {
+                e.Subject,
+                e.Organizer,
+                e.Start,
+                e.End
+            })
+            // Order results chronologically
+            .OrderBy("start/dateTime")
+            .GetAsync();
+
+        events = eventPage.CurrentPage;
+    }
+
+    private DateTime GetUtcStartOfWeekInTimeZone(DateTime today, string timeZoneId)
+    {
+        // Time zone returned by Graph could be Windows or IANA style
+        // TimeZoneConverter can take either
+        TimeZoneInfo userTimeZone = TZConvert.GetTimeZoneInfo(timeZoneId);
+
+        // Assumes Sunday as first day of week
+        int diff = System.DayOfWeek.Sunday - today.DayOfWeek;
+
+        // create date as unspecified kind
+        var unspecifiedStart = DateTime.SpecifyKind(today.AddDays(diff), DateTimeKind.Unspecified);
+
+        // convert to UTC
+        return TimeZoneInfo.ConvertTimeToUtc(unspecifiedStart, userTimeZone);
+    }
+
+    private string FormatIso8601DateTime(string iso8601DateTime)
+    {
+        // Load into a DateTime
+        var dateTime = DateTime.Parse(iso8601DateTime);
+
+        if (!string.IsNullOrWhiteSpace(dateTimeFormat))
+        {
+            // Format it using the user's settings
+            return dateTime.ToString(dateTimeFormat);
+        }
+
+        // Fallback to return original value
+        return iso8601DateTime;
+    }
+}
+
+    @*
+    It gets the current user's time zone, date format, and time format from the custom claims added to the user.
+    It calculates the start and end of the current week in the user's preferred time zone.
+    It gets a calendar view from Microsoft Graph for the current week.
+    It includes the Prefer: outlook.timezone header to cause Microsoft Graph to return the start and end properties in the specified time zone.
+    It uses Top(50) to request up to 50 events in the response.
+    It uses Select(u => new {}) to request just the properties used by the app.
+    It uses OrderBy("start/dateTime") to sort the results by start time.
+    *@
